@@ -36,6 +36,10 @@ final class PlaybackManager: ObservableObject, @unchecked Sendable {
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
     private var positions: [String: Double] = [:]
+    private var currentSourceURL: URL?
+    private var playbackRequestID = UUID()
+    private var cacheTask: Task<Void, Never>?
+    private var playbackOwnerID: UUID?
     private let historyKey = "drama.playback.history"
     private let positionsKey = "drama.playback.positions"
 
@@ -69,9 +73,18 @@ final class PlaybackManager: ObservableObject, @unchecked Sendable {
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
         }
+        cacheTask?.cancel()
     }
 
-    func play(drama: Drama, episode: Episode) {
+    func play(drama: Drama, episode: Episode, ownerID: UUID) {
+        playbackOwnerID = ownerID
+
+        guard let remoteURL = MediaURL.resolve(episode.videoUrl) else {
+            player.replaceCurrentItem(with: nil)
+            isPlaying = false
+            return
+        }
+
         let key = positionKey(dramaId: drama.dramaId, episodeNumber: episode.episodeNumber)
         let isCurrent = currentDramaId == drama.dramaId &&
             currentEpisodeNumber == episode.episodeNumber &&
@@ -85,14 +98,9 @@ final class PlaybackManager: ObservableObject, @unchecked Sendable {
             currentEpisodeNumber = episode.episodeNumber
             currentTime = positions[key] ?? 0
             duration = episode.duration
-
-            guard let url = MediaURL.resolve(episode.videoUrl) else {
-                player.replaceCurrentItem(with: nil)
-                isPlaying = false
-                return
-            }
-
-            player.replaceCurrentItem(with: AVPlayerItem(url: url))
+            playbackRequestID = UUID()
+            currentSourceURL = remoteURL
+            player.replaceCurrentItem(with: AVPlayerItem(url: remoteURL))
             let startTime = min(currentTime, max(episode.duration - 1, 0))
             player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
         }
@@ -101,9 +109,15 @@ final class PlaybackManager: ObservableObject, @unchecked Sendable {
         player.playImmediately(atRate: playbackRate)
         isPlaying = true
         updateHistory()
+        useCache(for: remoteURL, requestID: playbackRequestID)
     }
 
-    func pause() {
+    func pause(ownerID: UUID) {
+        guard playbackOwnerID == ownerID else { return }
+        pauseCurrentPlayback()
+    }
+
+    private func pauseCurrentPlayback() {
         player.pause()
         isPlaying = false
         saveCurrentState()
@@ -111,7 +125,7 @@ final class PlaybackManager: ObservableObject, @unchecked Sendable {
 
     func togglePlayback() {
         if isPlaying {
-            pause()
+            pauseCurrentPlayback()
         } else {
             if duration > 0, currentTime >= duration - 0.5 {
                 seek(to: 0)
@@ -180,6 +194,37 @@ final class PlaybackManager: ObservableObject, @unchecked Sendable {
 
     private func positionKey(dramaId: String, episodeNumber: Int) -> String {
         "\(dramaId)#\(episodeNumber)"
+    }
+
+    private func useCache(for remoteURL: URL, requestID: UUID) {
+        cacheTask?.cancel()
+        cacheTask = Task { [weak self] in
+            guard let self else { return }
+
+            if let localURL = await VideoCacheManager.shared.cachedURL(for: remoteURL) {
+                guard !Task.isCancelled else { return }
+                replaceCurrentItem(with: localURL, requestID: requestID)
+                return
+            }
+
+            _ = await VideoCacheManager.shared.cacheVideo(from: remoteURL)
+        }
+    }
+
+    private func replaceCurrentItem(with localURL: URL, requestID: UUID) {
+        guard playbackRequestID == requestID,
+              currentSourceURL != localURL else {
+            return
+        }
+
+        let position = player.currentTime()
+        let shouldResume = isPlaying
+        currentSourceURL = localURL
+        player.replaceCurrentItem(with: AVPlayerItem(url: localURL))
+        player.seek(to: position)
+        if shouldResume {
+            player.playImmediately(atRate: playbackRate)
+        }
     }
 
     private func restoreState() {

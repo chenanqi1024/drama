@@ -44,6 +44,12 @@ struct TheaterSection: Codable, Hashable {
     let dramas: [Drama]
 }
 
+struct FullscreenPlayback: Identifiable {
+    let id = UUID()
+    let drama: Drama
+    let episode: Episode
+}
+
 enum MediaURL {
     private static let baseURL = URL(string: "https://zzz-pet.oss-cn-hangzhou.aliyuncs.com/api/")!
 

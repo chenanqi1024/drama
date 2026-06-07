@@ -8,55 +8,54 @@ struct DramaPlaybackView: View {
     let drama: Drama
     @State private var selectedEpisodeNumber: Int?
     @State private var isVisible = false
+    @State private var playbackOwnerID = UUID()
+    @State private var fullscreenPlayback: FullscreenPlayback?
+    @State private var lockedEpisodeNumber: Int?
 
     var body: some View {
-        GeometryReader { proxy in
-            ZStack {
-                Color.black.ignoresSafeArea()
+        ZStack {
+            Color.black.ignoresSafeArea()
 
-                ScrollView(.vertical) {
-                    LazyVStack(spacing: 0) {
-                        ForEach(drama.episodes) { episode in
-                            EpisodePage(
-                                drama: drama,
-                                episode: episode,
-                                isActive: isVisible && selectedEpisodeNumber == episode.episodeNumber
-                            )
-                            .frame(width: proxy.size.width, height: proxy.size.height)
-                            .id(episode.episodeNumber)
-                        }
-                    }
-                    .scrollTargetLayout()
+            if fullscreenPlayback == nil {
+                VerticalPager(items: drama.episodes, selection: selectedEpisodePosition) { episode in
+                    EpisodePage(
+                        drama: drama,
+                        episode: episode,
+                        isActive: isVisible &&
+                            lockedEpisodeNumber == nil &&
+                            selectedEpisodeNumber == episode.episodeNumber,
+                        presentFullscreen: presentFullscreen
+                    )
                 }
-                .scrollIndicators(.hidden)
-                .scrollTargetBehavior(.paging)
-                .scrollPosition(id: $selectedEpisodeNumber)
+            }
 
-                VStack {
-                    HStack {
-                        Button {
-                            dismiss()
-                        } label: {
-                            Image(systemName: "chevron.left")
-                                .font(.headline.weight(.bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 42, height: 42)
-                                .background(.black.opacity(0.45), in: Circle())
-                        }
-
-                        Spacer()
-
-                        PlaybackRateMenu()
+            VStack {
+                HStack {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.headline.weight(.bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 42, height: 42)
+                            .background(.black.opacity(0.45), in: Circle())
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 8)
 
                     Spacer()
+
+                    PlaybackRateMenu()
                 }
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+
+                Spacer()
             }
         }
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
+        .fullScreenCover(item: $fullscreenPlayback, onDismiss: resumeAfterFullscreen) { playback in
+            LandscapePlayerView(drama: playback.drama, episode: playback.episode)
+        }
         .onAppear {
             isVisible = true
             if selectedEpisodeNumber == nil {
@@ -69,7 +68,7 @@ struct DramaPlaybackView: View {
         }
         .onDisappear {
             isVisible = false
-            playbackManager.pause()
+            playbackManager.pause(ownerID: playbackOwnerID)
         }
         .onChange(of: selectedEpisodeNumber) {
             activateSelectedEpisode()
@@ -77,22 +76,48 @@ struct DramaPlaybackView: View {
     }
 
     private func activateSelectedEpisode() {
-        guard isVisible,
+        guard isVisible, lockedEpisodeNumber == nil,
               let selectedEpisodeNumber,
               let episode = drama.episodes.first(where: { $0.episodeNumber == selectedEpisodeNumber }) else {
             return
         }
-        playbackManager.play(drama: drama, episode: episode)
+        playbackManager.play(drama: drama, episode: episode, ownerID: playbackOwnerID)
+    }
+
+    private func presentFullscreen(drama: Drama, episode: Episode) {
+        lockedEpisodeNumber = episode.episodeNumber
+        selectedEpisodeNumber = episode.episodeNumber
+        fullscreenPlayback = FullscreenPlayback(drama: drama, episode: episode)
+    }
+
+    private func resumeAfterFullscreen() {
+        guard let lockedEpisodeNumber,
+              let episode = drama.episodes.first(where: { $0.episodeNumber == lockedEpisodeNumber }) else {
+            return
+        }
+
+        isVisible = true
+        selectedEpisodeNumber = lockedEpisodeNumber
+        playbackManager.play(drama: drama, episode: episode, ownerID: playbackOwnerID)
+        self.lockedEpisodeNumber = nil
+    }
+
+    private var selectedEpisodePosition: Binding<Int?> {
+        Binding(
+            get: { selectedEpisodeNumber },
+            set: { newValue in
+                guard lockedEpisodeNumber == nil else { return }
+                selectedEpisodeNumber = newValue
+            }
+        )
     }
 }
 
 private struct EpisodePage: View {
-    @EnvironmentObject private var playbackManager: PlaybackManager
-
     let drama: Drama
     let episode: Episode
     let isActive: Bool
-    @State private var showsFullscreen = false
+    let presentFullscreen: (Drama, Episode) -> Void
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -104,7 +129,7 @@ private struct EpisodePage: View {
                 PlaybackCanvas(
                     drama: drama,
                     episode: episode,
-                    isActive: isActive && !showsFullscreen,
+                    isActive: isActive,
                     gravity: episode.aspectRatio < 1 ? .resizeAspectFill : .resizeAspect
                 )
                 .aspectRatio(max(episode.aspectRatio, 0.2), contentMode: .fit)
@@ -113,7 +138,7 @@ private struct EpisodePage: View {
 
                 if episode.aspectRatio >= 4.0 / 3.0 {
                     Button {
-                        showsFullscreen = true
+                        presentFullscreen(drama, episode)
                     } label: {
                         Label("全屏观看", systemImage: "arrow.up.left.and.arrow.down.right")
                             .font(.subheadline.weight(.semibold))
@@ -141,19 +166,16 @@ private struct EpisodePage: View {
                 Text(episodeInfoText)
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.72))
+
+                PlaybackProgressControl(
+                    isActive: isActive,
+                    fallbackDuration: episode.duration
+                )
             }
             .foregroundStyle(.white)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 16)
             .padding(.bottom, 22)
-        }
-        .fullScreenCover(isPresented: $showsFullscreen) {
-            LandscapePlayerView(drama: drama, episode: episode)
-        }
-        .onChange(of: showsFullscreen) {
-            if !showsFullscreen, isActive {
-                playbackManager.play(drama: drama, episode: episode)
-            }
         }
     }
 

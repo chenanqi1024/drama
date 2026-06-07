@@ -8,6 +8,7 @@ struct LandscapePlayerView: View {
 
     let drama: Drama
     let episode: Episode
+    @State private var playbackOwnerID = UUID()
 
     var body: some View {
         ZStack {
@@ -43,22 +44,10 @@ struct LandscapePlayerView: View {
                             .frame(width: 44, height: 44)
                     }
 
-                    Text(playbackManager.currentTime.playbackTimeText)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.white)
-
-                    Slider(
-                        value: Binding(
-                            get: { playbackManager.currentTime },
-                            set: { playbackManager.seek(to: $0) }
-                        ),
-                        in: 0...max(playbackManager.duration, 1)
+                    PlaybackProgressControl(
+                        isActive: true,
+                        fallbackDuration: episode.duration
                     )
-                    .tint(.red)
-
-                    Text(playbackManager.duration.playbackTimeText)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.white)
                 }
                 .padding(.horizontal, 22)
                 .padding(.vertical, 12)
@@ -67,7 +56,11 @@ struct LandscapePlayerView: View {
         }
         .onAppear {
             OrientationManager.set(.landscape)
-            playbackManager.play(drama: drama, episode: episode)
+            playbackManager.play(
+                drama: drama,
+                episode: episode,
+                ownerID: playbackOwnerID
+            )
         }
         .onDisappear {
             OrientationManager.set(.portrait)

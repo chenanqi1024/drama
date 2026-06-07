@@ -6,6 +6,9 @@ struct HomeView: View {
     @EnvironmentObject private var playbackManager: PlaybackManager
     @State private var selectedDramaId: String?
     @State private var isVisible = false
+    @State private var playbackOwnerID = UUID()
+    @State private var fullscreenPlayback: FullscreenPlayback?
+    @State private var lockedDramaId: String?
 
     var body: some View {
         Group {
@@ -15,30 +18,26 @@ struct HomeView: View {
                 LoadErrorView(message: errorMessage) {
                     Task { await store.load() }
                 }
+            } else if fullscreenPlayback != nil {
+                Color.black
             } else {
-                GeometryReader { proxy in
-                    ScrollView(.vertical) {
-                        LazyVStack(spacing: 0) {
-                            ForEach(store.homeDramas) { drama in
-                                HomeDramaPage(
-                                    drama: drama,
-                                    isActive: isVisible && selectedDramaId == drama.id
-                                )
-                                .frame(width: proxy.size.width, height: proxy.size.height)
-                                .id(drama.id)
-                            }
-                        }
-                        .scrollTargetLayout()
-                    }
-                    .scrollIndicators(.hidden)
-                    .scrollTargetBehavior(.paging)
-                    .scrollPosition(id: $selectedDramaId)
+                VerticalPager(items: store.homeDramas, selection: selectedDramaPosition) { drama in
+                    HomeDramaPage(
+                        drama: drama,
+                        isActive: isVisible &&
+                            lockedDramaId == nil &&
+                            selectedDramaId == drama.id,
+                        presentFullscreen: presentFullscreen
+                    )
                 }
                 .background(.black)
             }
         }
         .ignoresSafeArea(edges: .top)
         .toolbar(.hidden, for: .navigationBar)
+        .fullScreenCover(item: $fullscreenPlayback, onDismiss: resumeAfterFullscreen) { playback in
+            LandscapePlayerView(drama: playback.drama, episode: playback.episode)
+        }
         .onAppear {
             isVisible = true
             if selectedDramaId == nil {
@@ -48,7 +47,7 @@ struct HomeView: View {
         }
         .onDisappear {
             isVisible = false
-            playbackManager.pause()
+            playbackManager.pause(ownerID: playbackOwnerID)
         }
         .onChange(of: selectedDramaId) {
             activateSelectedDrama()
@@ -62,22 +61,50 @@ struct HomeView: View {
     }
 
     private func activateSelectedDrama() {
-        guard isVisible,
+        guard isVisible, lockedDramaId == nil,
               let selectedDramaId,
               let drama = store.homeDramas.first(where: { $0.id == selectedDramaId }),
               let episode = drama.episodes.first else {
             return
         }
-        playbackManager.play(drama: drama, episode: episode)
+        playbackManager.play(drama: drama, episode: episode, ownerID: playbackOwnerID)
+    }
+
+    private func presentFullscreen(drama: Drama, episode: Episode) {
+        lockedDramaId = drama.dramaId
+        selectedDramaId = drama.dramaId
+        fullscreenPlayback = FullscreenPlayback(drama: drama, episode: episode)
+    }
+
+    private func resumeAfterFullscreen() {
+        guard let lockedDramaId,
+              let drama = store.homeDramas.first(where: { $0.dramaId == lockedDramaId }),
+              let episode = drama.episodes.first else {
+            return
+        }
+
+        isVisible = true
+        selectedDramaId = lockedDramaId
+        playbackManager.play(drama: drama, episode: episode, ownerID: playbackOwnerID)
+        self.lockedDramaId = nil
+    }
+
+    private var selectedDramaPosition: Binding<String?> {
+        Binding(
+            get: { selectedDramaId },
+            set: { newValue in
+                guard lockedDramaId == nil else { return }
+                selectedDramaId = newValue
+            }
+        )
     }
 }
 
 private struct HomeDramaPage: View {
-    @EnvironmentObject private var playbackManager: PlaybackManager
-
     let drama: Drama
     let isActive: Bool
-    @State private var showsFullscreen = false
+    let presentFullscreen: (Drama, Episode) -> Void
+    @State private var isDescriptionExpanded = false
 
     private var episode: Episode? {
         drama.episodes.first
@@ -94,7 +121,7 @@ private struct HomeDramaPage: View {
                     PlaybackCanvas(
                         drama: drama,
                         episode: episode,
-                        isActive: isActive && !showsFullscreen,
+                        isActive: isActive,
                         gravity: episode.aspectRatio < 1 ? .resizeAspectFill : .resizeAspect
                     )
                     .aspectRatio(max(episode.aspectRatio, 0.2), contentMode: .fit)
@@ -103,7 +130,7 @@ private struct HomeDramaPage: View {
 
                     if episode.aspectRatio >= 4.0 / 3.0 {
                         Button {
-                            showsFullscreen = true
+                            presentFullscreen(drama, episode)
                         } label: {
                             Label("全屏观看", systemImage: "arrow.up.left.and.arrow.down.right")
                                 .font(.subheadline.weight(.semibold))
@@ -123,7 +150,7 @@ private struct HomeDramaPage: View {
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: 210)
+            .frame(height: isDescriptionExpanded ? 340 : 260)
             .allowsHitTesting(false)
 
             VStack(alignment: .leading, spacing: 12) {
@@ -136,6 +163,26 @@ private struct HomeDramaPage: View {
                     Text(drama.tags.map { "#\($0)" }.joined(separator: "  "))
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.75))
+                }
+
+                if !drama.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(drama.description)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.88))
+                        .lineLimit(isDescriptionExpanded ? nil : 2)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isDescriptionExpanded.toggle()
+                            }
+                        }
+                }
+
+                if let episode {
+                    PlaybackProgressControl(
+                        isActive: isActive,
+                        fallbackDuration: episode.duration
+                    )
                 }
 
                 NavigationLink(value: drama) {
@@ -158,16 +205,6 @@ private struct HomeDramaPage: View {
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 10)
-        }
-        .fullScreenCover(isPresented: $showsFullscreen) {
-            if let episode {
-                LandscapePlayerView(drama: drama, episode: episode)
-            }
-        }
-        .onChange(of: showsFullscreen) {
-            if !showsFullscreen, isActive, let episode {
-                playbackManager.play(drama: drama, episode: episode)
-            }
         }
     }
 }
