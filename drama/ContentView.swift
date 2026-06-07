@@ -1,24 +1,53 @@
-//
-//  ContentView.swift
-//  drama
-//
-//  Created by chenanqi on 2026/6/7.
-//
-
 import SwiftUI
 
 struct ContentView: View {
+    @StateObject private var store = DramaStore()
+    @StateObject private var playbackManager = PlaybackManager()
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        TabView {
+            NavigationStack {
+                HomeView()
+                    .navigationDestination(for: Drama.self) { drama in
+                        DramaPlaybackView(drama: drama)
+                    }
+            }
+            .tabItem {
+                Label("首页", systemImage: "house.fill")
+            }
+
+            NavigationStack {
+                TheaterView()
+                    .navigationDestination(for: Drama.self) { drama in
+                        DramaPlaybackView(drama: drama)
+                    }
+            }
+            .tabItem {
+                Label("剧场", systemImage: "rectangle.stack.fill")
+            }
+
+            NavigationStack {
+                ProfileView()
+                    .navigationDestination(for: Drama.self) { drama in
+                        DramaPlaybackView(drama: drama)
+                    }
+            }
+            .tabItem {
+                Label("我的", systemImage: "person.fill")
+            }
         }
-        .padding()
+        .tint(.red)
+        .toolbarBackground(.black, for: .tabBar)
+        .toolbarBackground(.visible, for: .tabBar)
+        .environmentObject(store)
+        .environmentObject(playbackManager)
+        .task {
+            await store.load()
+        }
     }
 }
 
 #Preview {
     ContentView()
+        .preferredColorScheme(.dark)
 }
